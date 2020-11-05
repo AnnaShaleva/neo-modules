@@ -84,6 +84,31 @@ namespace Neo.Plugins
             return json;
         }
 
+        private JObject GetVerificationResult(StoreView snapshot, []byte script, UInt160 script_hash, Witness witness, Signers signers = null)
+        {
+            if (!TryCreateVerifyEngine(signers, snapshot, script_hash, witness, settings.MaxGasInvoke, out var engine))
+            {
+                 throw new RpcException(-300, "Cannot create verification engine");
+            }
+            JObject json = new JObject();
+            using(engine)
+            {
+                json["script"] = Convert.ToBase64String(script);
+                json["state"] = engine.Execute();
+                json["gasconsumed"] = engine.GasConsumed.ToString();
+                json["exception"] = GetExceptionMessage(engine.FaultException);
+                try
+                {
+                    json["stack"] = new JArray(engine.ResultStack.Select(p => p.ToJson()));
+                }
+                catch (InvalidOperationException)
+                {
+                    json["stack"] = "error: recursive reference";
+                }
+            }
+            return json;
+        }
+
         private static Signers SignersFromJson(JArray _params)
         {
             var ret = new Signers(_params.Select(u => new Signer()
@@ -109,6 +134,18 @@ namespace Neo.Plugins
             ContractParameter[] args = _params.Count >= 3 ? ((JArray)_params[2]).Select(p => ContractParameter.FromJson(p)).ToArray() : new ContractParameter[0];
             Signers signers = _params.Count >= 4 ? SignersFromJson((JArray)_params[3]) : null;
 
+            if (operation == "verify")
+            {
+                byte[] invocationScript;
+                using (ScriptBuilder sb = new ScriptBuilder())
+                {
+                    invocationScript = sb.EmitPush(args).ToArray();
+                }
+                var snapshot = Blockchain.Singleton.GetSnapshot();
+                var contract = snapshot.Contracts.TryGet(script_hash);
+                return GetVerificationResult(snapshot, contract.Script, script_hash, new Witness{ InvocationScript = invocationScript }, signers);
+            }
+
             byte[] script;
             using (ScriptBuilder sb = new ScriptBuilder())
             {
@@ -123,6 +160,20 @@ namespace Neo.Plugins
             byte[] script = Convert.FromBase64String(_params[0].AsString());
             Signers signers = _params.Count >= 2 ? SignersFromJson((JArray)_params[1]) : null;
             return GetInvokeResult(script, signers);
+        }
+
+        [RpcMethod]
+        protected virtual JObject InvokeScriptVerify(JArray _params)
+        {
+            byte[] invocationScript = Convert.FromBase64String(_params[0].AsString());
+            byte[] verificationScript = Convert.FromBase64String(_params[1].AsString());
+            Signers signers = _params.Count >= 3 ? SignersFromJson((JArray)_params[2]) : null;
+            var snapshot = Blockchain.Singleton.GetSnapshot();
+            return GetVerificationResult(snapshot, invocationScript, null, new Witness
+                {
+                    InvocationScript = invocationScript,
+                    VerificationScript = verificationScript
+                }, signers);
         }
 
         [RpcMethod]
